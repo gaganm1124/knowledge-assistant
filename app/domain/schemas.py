@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 class HealthResponse(BaseModel):
     status: str
     app_name: str
+    db_status: str
 
 
 class IngestRequest(BaseModel):
