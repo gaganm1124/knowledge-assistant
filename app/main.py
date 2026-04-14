@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy import text
 
 from app.api.routes_debug import router as debug_router
 from app.api.routes_health import router as health_router
@@ -15,9 +16,13 @@ from app.db.session import Base, engine
 async def lifespan(app: FastAPI):
     configure_logging()
 
-    # Create tables on startup (good for Week 1).
-    # In later weeks, you can switch to Alembic migrations.
-    Base.metadata.create_all(bind=engine)
+    # Ensure pgvector is available before creating tables that use VECTOR columns.
+    with engine.begin() as connection:
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+
+        # Create tables on startup (good for Week 1).
+        # In later weeks, you can switch to Alembic migrations.
+        Base.metadata.create_all(bind=connection)
 
     yield
 

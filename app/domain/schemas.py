@@ -10,7 +10,7 @@ class HealthResponse(BaseModel):
 class IngestRequest(BaseModel):
     source_dir: str | None = Field(default="data/raw")
     recursive: bool = True
-    file_types: list[str] = ["md", "txt"]
+    file_types: list[str] = Field(default_factory=lambda: ["md", "txt"])
     chunking_strategy: str = "fixed"
 
 
