@@ -7,7 +7,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
-
+from app.core.config import settings
 
 class Document(Base):
     __tablename__ = "documents"
@@ -55,7 +55,7 @@ class Chunk(Base):
     # IMPORTANT:
     # Replace 1536 with your embedding dimension later if needed.
     # For Week 1, it's okay to keep this even if embeddings aren't used yet.
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dim), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

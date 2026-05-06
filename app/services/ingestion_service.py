@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Chunk, Document
 from app.services.chunking_service import ChunkingService
 from app.services.document_parser import DocumentParser
+from app.services.embedding_service import EmbeddingService
 from app.utils.file_utils import compute_sha256, discover_files
 
 
@@ -33,10 +34,12 @@ class IngestionService:
             db: Session,
             parser: DocumentParser,
             chunker: ChunkingService,
+            embedding_service: EmbeddingService
     ):
         self.db = db
         self.parser = parser
         self.chunker = chunker
+        self.embedding_service = embedding_service
 
     def ingest_directory(
             self,
@@ -74,7 +77,11 @@ class IngestionService:
 
             chunk_payloads = self.chunker.chunk_text(parsed.normalized_text)
 
-            for payload in chunk_payloads:
+            # Batch embed all chunk texts for this document
+            chunk_texts = [payload.content for payload in chunk_payloads]
+            embeddings = self.embedding_service.embed_texts(chunk_texts)
+
+            for payload, embedding in zip(chunk_payloads, embeddings):
                 chunk = Chunk(
                     document_id=document.id,
                     chunk_index=payload.chunk_index,
@@ -83,8 +90,7 @@ class IngestionService:
                     token_estimate=payload.token_estimate,
                     char_start=payload.char_start,
                     char_end=payload.char_end,
-                    # Week 2: embeddings not yet added
-                    embedding=None,
+                    embedding=embedding,
                 )
                 self.db.add(chunk)
 

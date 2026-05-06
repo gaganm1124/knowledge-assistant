@@ -24,6 +24,15 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
+      - hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
 
 volumes:
   postgres_data:
+  hf_cache:
