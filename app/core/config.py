@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_api_url: str = ""
     embedding_dim: int = 768
+    
+    llm_provider: str = "local"
+    llm_model: str = "qwen3:14b"
+    llm_api_key: str = ""
+    llm_api_url: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

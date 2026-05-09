@@ -1,0 +1,12 @@
+# Ignore everything by default, then explicitly allow files needed by the image.
+**
+
+!app/
+!app/**
+!migrations/
+!migrations/**
+!scripts/
+!scripts/**
+!requirements.txt
+!alembic.ini
+!README.md
