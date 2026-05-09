@@ -23,90 +23,122 @@ The repository includes sample engineering documents so the full ingestion and q
 
 ```mermaid
 flowchart LR
-    Client[Client or API consumer] --> API[FastAPI application]
+    Client["API Client"]:::client
 
-    API --> Ingest[Document ingestion API]
-    API --> Query[Query API]
-    API --> Debug[Retrieval debug API]
+    subgraph App["Knowledge Assistant API"]
+        direction TB
+        Ingest["Ingest"]:::api
+        Ask["Ask"]:::api
+        Inspect["Inspect"]:::api
+    end
 
-    Ingest --> Parser[DocumentParser]
-    Parser --> Chunker[ChunkingService]
-    Chunker --> Embedder[EmbeddingService]
-    Embedder --> VectorDB[(PostgreSQL + pgvector)]
+    subgraph Pipeline["RAG Pipeline"]
+        direction LR
+        Parse["Parse"]:::stage
+        Chunk["Chunk"]:::stage
+        Embed["Embed"]:::stage
+        Retrieve["Retrieve"]:::stage
+        Generate["Generate"]:::stage
+        Cite["Cite"]:::stage
+    end
 
-    Query --> QueryEmbed[EmbeddingService]
-    QueryEmbed --> Retriever[RetrievalService]
-    Retriever --> VectorDB
-    Retriever --> Generator[GenerationService]
-    Generator --> LLM[Ollama-compatible LLM]
-    Generator --> Citations[CitationService]
-    Citations --> Response[Grounded answer + citations]
+    Store[("Documents<br/>Chunks<br/>Vectors")]:::db
+    LLM["Local LLM"]:::llm
+    Answer["Answer<br/>Citations<br/>Latency"]:::response
 
-    Debug --> Retriever
+    Client --> App
+    Ingest --> Parse --> Chunk --> Embed --> Store
+    Ask --> Embed
+    Embed --> Retrieve
+    Retrieve <--> Store
+    Retrieve --> Generate --> LLM
+    LLM --> Generate --> Cite --> Answer
+    Inspect --> Retrieve
+
+    classDef client fill:#f8fafc,stroke:#475569,stroke-width:1px,color:#0f172a;
+    classDef api fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a8a;
+    classDef stage fill:#ecfdf5,stroke:#059669,stroke-width:1px,color:#064e3b;
+    classDef db fill:#fff7ed,stroke:#ea580c,stroke-width:1px,color:#7c2d12;
+    classDef llm fill:#f5f3ff,stroke:#7c3aed,stroke-width:1px,color:#3b0764;
+    classDef response fill:#fefce8,stroke:#ca8a04,stroke-width:1px,color:#713f12;
 ```
 
 ## RAG Pipeline
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant User
-    participant API as FastAPI
-    participant Parser as Parser/Chunker
-    participant Embeddings as Embedding Provider
-    participant DB as PostgreSQL + pgvector
-    participant LLM as Local LLM
+    participant API
+    participant Docs
+    participant Vectors
+    participant Search
+    participant LLM
 
-    User->>API: POST /v1/documents/ingest
-    API->>Parser: Parse, normalize, chunk documents
-    Parser->>Embeddings: Generate chunk embeddings
-    Embeddings->>DB: Store documents, chunks, vectors
+    rect rgb(239, 246, 255)
+        User->>API: ingest documents
+        API->>Docs: parse and chunk
+        Docs->>Vectors: embed chunks
+        Vectors->>Search: persist vectors
+    end
 
-    User->>API: POST /v1/query
-    API->>Embeddings: Embed user query
-    Embeddings->>DB: Vector similarity search
-    DB-->>API: Relevant chunks
-    API->>LLM: Generate answer from retrieved context
-    LLM-->>API: Grounded response
-    API-->>User: Answer, citations, latency, debug metadata
+    rect rgb(240, 253, 244)
+        User->>API: ask question
+        API->>Vectors: embed query
+        Vectors->>Search: find nearest chunks
+        Search-->>API: ranked context
+        API->>LLM: answer from context
+        LLM-->>API: grounded answer
+        API-->>User: answer + citations
+    end
 ```
 
 ## System Components
 
 ```mermaid
 flowchart TB
-    subgraph API["API Layer"]
-        Health["/health"]
-        IngestRoute["/v1/documents/ingest"]
-        QueryRoute["/v1/query"]
-        DebugRoute["/v1/retrieval/debug"]
+    subgraph Routes["API Routes"]
+        direction LR
+        Health["Health"]:::route
+        IngestRoute["Ingest"]:::route
+        QueryRoute["Query"]:::route
+        DebugRoute["Debug"]:::route
     end
 
     subgraph Services["Service Layer"]
-        DocumentParser
-        ChunkingService
-        IngestionService
-        RetrievalService
-        GenerationService
-        CitationService
+        direction LR
+        ParseSvc["Parse"]:::service
+        ChunkSvc["Chunk"]:::service
+        IngestSvc["Ingest"]:::service
+        RetrievalSvc["Retrieve"]:::service
+        GenerationSvc["Generate"]:::service
+        CitationSvc["Cite"]:::service
     end
 
-    subgraph Providers["Provider Layer"]
-        LocalEmbeddings["LocalEmbeddingProvider<br/>SentenceTransformers"]
-        HostedEmbeddings["HostedEmbeddingProvider<br/>OpenAI-compatible API"]
-        LocalLLM["LocalLLMProvider<br/>Ollama-compatible API"]
+    subgraph Providers["Model Providers"]
+        direction LR
+        LocalEmbeddings["Local<br/>Embeddings"]:::provider
+        HostedEmbeddings["Hosted<br/>Embeddings"]:::provider
+        LocalLLM["Local<br/>LLM"]:::provider
     end
 
     subgraph Storage["Storage"]
-        Postgres["PostgreSQL"]
-        Pgvector["pgvector"]
-        Alembic["Alembic migrations"]
+        direction LR
+        Postgres[("PostgreSQL")]:::storage
+        Pgvector[("pgvector")]:::storage
+        Alembic["Migrations"]:::storage
     end
 
-    API --> Services
+    Routes --> Services
     Services --> Providers
     Services --> Storage
-    Postgres --> Pgvector
+    Postgres --- Pgvector
     Alembic --> Postgres
+
+    classDef route fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
+    classDef service fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    classDef provider fill:#f5f3ff,stroke:#7c3aed,color:#3b0764;
+    classDef storage fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
 ```
 
 ## Features
