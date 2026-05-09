@@ -9,6 +9,7 @@ from app.services.chunking_service import ChunkingService
 from app.services.document_parser import DocumentParser
 from app.services.embedding_service import EmbeddingService
 from app.services.ingestion_service import IngestionService
+from app.services.runtime_state import query_cache
 
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
 
@@ -45,6 +46,8 @@ def ingest_documents(
         recursive=request.recursive,
         file_types=request.file_types,
     )
+
+    query_cache.invalidate_all()
 
     return IngestResponse(
         documents_ingested=result.documents_ingested,

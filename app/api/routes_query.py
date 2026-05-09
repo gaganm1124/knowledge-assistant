@@ -1,8 +1,7 @@
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.session import get_db
 from app.domain.schemas import QueryRequest, QueryResponse
 from app.providers.embeddings.local_provider import LocalEmbeddingProvider
@@ -10,8 +9,10 @@ from app.providers.llm.local_provider import LocalLLMProvider
 from app.services.citation_service import CitationService
 from app.services.embedding_service import EmbeddingService
 from app.services.generation_service import GenerationService
+from app.services.metrics_service import MetricsService
 from app.services.query_service import QueryService
 from app.services.retrieval_service import RetrievalService
+from app.services.runtime_state import query_cache
 
 router = APIRouter(prefix="/v1", tags=["query"])
 
@@ -37,10 +38,15 @@ def query_knowledge_base(request: QueryRequest, db: Session = Depends(get_db)) -
 
     citation_service = CitationService()
 
+    metrics_service = MetricsService(db=db)
+    cache_service = query_cache if settings.enable_cache else None
+
     query_service = QueryService(
         retrieval_service=retrieval_service,
         generation_service=generation_service,
         citation_service=citation_service,
+        metrics_service=metrics_service,
+        cache_service=cache_service,
     )
 
     return query_service.answer_query(
@@ -49,4 +55,5 @@ def query_knowledge_base(request: QueryRequest, db: Session = Depends(get_db)) -
         max_context_chunks=request.max_context_chunks,
         min_score_threshold=request.min_score_threshold,
         include_debug=request.include_debug,
+        use_cache=request.use_cache,
     )

@@ -16,8 +16,10 @@ Knowledge Assistant is designed for teams that want a transparent, self-hostable
 - grounded answer generation
 - source citations
 - latency and debug metadata
+- in-memory response caching
+- query telemetry persisted to the database
 
-The repository includes sample engineering documents so the full ingestion and query flow can be tried immediately.
+The repository includes sample engineering documents, so the full ingestion and query flow can be tried immediately.
 
 ## Architecture
 
@@ -43,22 +45,28 @@ flowchart LR
     end
 
     Store[("Documents<br/>Chunks<br/>Vectors")]:::db
+    Cache[("Query Cache")]:::cache
+    Metrics[("Query Logs")]:::db
     LLM["Local LLM"]:::llm
     Answer["Answer<br/>Citations<br/>Latency"]:::response
 
     Client --> App
     Ingest --> Parse --> Chunk --> Embed --> Store
+    Ingest --> Cache
     Ask --> Embed
+    Ask <--> Cache
     Embed --> Retrieve
     Retrieve <--> Store
     Retrieve --> Generate --> LLM
     LLM --> Generate --> Cite --> Answer
+    Ask --> Metrics
     Inspect --> Retrieve
 
     classDef client fill:#f8fafc,stroke:#475569,stroke-width:1px,color:#0f172a;
     classDef api fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a8a;
     classDef stage fill:#ecfdf5,stroke:#059669,stroke-width:1px,color:#064e3b;
     classDef db fill:#fff7ed,stroke:#ea580c,stroke-width:1px,color:#7c2d12;
+    classDef cache fill:#f0fdfa,stroke:#0d9488,stroke-width:1px,color:#134e4a;
     classDef llm fill:#f5f3ff,stroke:#7c3aed,stroke-width:1px,color:#3b0764;
     classDef response fill:#fefce8,stroke:#ca8a04,stroke-width:1px,color:#713f12;
 ```
@@ -73,6 +81,7 @@ sequenceDiagram
     participant Docs
     participant Vectors
     participant Search
+    participant Cache
     participant LLM
 
     rect rgb(239, 246, 255)
@@ -80,15 +89,18 @@ sequenceDiagram
         API->>Docs: parse and chunk
         Docs->>Vectors: embed chunks
         Vectors->>Search: persist vectors
+        API->>Cache: invalidate query cache
     end
 
     rect rgb(240, 253, 244)
         User->>API: ask question
+        API->>Cache: check cached response
         API->>Vectors: embed query
         Vectors->>Search: find nearest chunks
         Search-->>API: ranked context
         API->>LLM: answer from context
         LLM-->>API: grounded answer
+        API->>Cache: cache response
         API-->>User: answer + citations
     end
 ```
@@ -113,6 +125,8 @@ flowchart TB
         RetrievalSvc["Retrieve"]:::service
         GenerationSvc["Generate"]:::service
         CitationSvc["Cite"]:::service
+        CacheSvc["Cache"]:::service
+        MetricsSvc["Metrics"]:::service
     end
 
     subgraph Providers["Model Providers"]
@@ -126,6 +140,7 @@ flowchart TB
         direction LR
         Postgres[("PostgreSQL")]:::storage
         Pgvector[("pgvector")]:::storage
+        QueryLogs[("query_logs")]:::storage
         Alembic["Migrations"]:::storage
     end
 
@@ -133,6 +148,7 @@ flowchart TB
     Services --> Providers
     Services --> Storage
     Postgres --- Pgvector
+    MetricsSvc --> QueryLogs
     Alembic --> Postgres
 
     classDef route fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
@@ -147,12 +163,16 @@ flowchart TB
 - Extract titles from Markdown headings or filenames.
 - Normalize text and create fixed-size overlapping chunks.
 - Generate local embeddings with SentenceTransformers.
-- Optionally use a hosted OpenAI-compatible embeddings endpoint.
+- Optionally, use a hosted OpenAI-compatible embedding endpoint.
 - Store document metadata, chunk metadata, and vectors in PostgreSQL.
 - Retrieve relevant chunks using pgvector cosine distance.
 - Generate grounded answers using only retrieved context.
 - Return citations for the chunks used as evidence.
 - Include request IDs, fallback flags, latency breakdowns, and optional debug payloads.
+- Cache repeated query responses with a configurable in-memory TTL.
+- Invalidate cached query responses after document ingestion.
+- Persist request-level query metrics, latency, cache-hit, and fallback telemetry.
+- Emit structured JSON events for query completion and cache hits.
 - Manage schema changes with Alembic migrations.
 
 ## Tech Stack
@@ -179,7 +199,7 @@ app/
   providers/
     embeddings/            local and hosted embedding providers
     llm/                   local LLM provider
-  services/                ingestion, retrieval, generation, citations
+  services/                ingestion, retrieval, generation, citations, caching, metrics
   utils/                   file helpers
 data/raw/                  sample documents
 migrations/                Alembic migrations
@@ -210,10 +230,10 @@ cp .env.template .env
 Set the database values in `.env`:
 
 ```env
-DATABASE_USER=postgres
-DATABASE_PASSWORD=postgres
-DATABASE_NAME=ragdb
-DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/ragdb
+DATABASE_USER=<database-user>
+DATABASE_PASSWORD=<database-password>
+DATABASE_NAME=<database-name>
+DATABASE_URL=postgresql+psycopg2://<database-user>:<database-password>@db:5432/<database-name>
 ```
 
 Start the application and database:
@@ -263,16 +283,19 @@ The default embedding provider runs locally with SentenceTransformers:
 EMBEDDING_PROVIDER=local
 EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
 EMBEDDING_DIM=768
+EMBEDDING_CACHE_DIR=/root/.cache/huggingface/sentence-transformers
 ```
 
 `BAAI/bge-base-en-v1.5` produces 768-dimensional vectors. If you change the embedding model, `EMBEDDING_DIM` and the `chunks.embedding` pgvector column dimension must match.
 
-The hosted embedding provider assumes an OpenAI-compatible embeddings endpoint:
+Docker Compose mounts the `hf_cache` volume at `/root/.cache/huggingface`. The local embedding provider first tries to load the SentenceTransformers model from `EMBEDDING_CACHE_DIR` with local files only. If the volume is empty, the model is downloaded once into that volume and reused on later container starts.
+
+The hosted embedding provider assumes an OpenAI-compatible embedding endpoint:
 
 ```env
 EMBEDDING_PROVIDER=hosted
-EMBEDDING_API_KEY=...
-EMBEDDING_API_URL=...
+EMBEDDING_API_KEY=<embedding-api-key>
+EMBEDDING_API_URL=<embedding-api-url>
 ```
 
 ## API Usage
@@ -328,6 +351,8 @@ curl -X POST http://localhost:8000/v1/query \
     "query": "How do we roll back a failed deployment?",
     "top_k": 5,
     "max_context_chunks": 4,
+    "min_score_threshold": null,
+    "use_cache": true,
     "include_debug": true
   }'
 ```
@@ -352,11 +377,16 @@ Response shape:
     "total": 1246.9
   },
   "debug": {
+    "cache_hit": false,
+    "cache_key": "...",
+    "normalized_query": "how do we roll back a failed deployment?",
     "retrieved_chunks": [],
     "context_chunk_count": 4
   }
 }
 ```
+
+When `use_cache` is true and `ENABLE_CACHE` is enabled, repeated requests with the same normalized query and retrieval settings can be served from the in-memory cache. Each cached response receives a fresh `request_id`. Running document ingestion clears the query cache so new or changed content can be retrieved.
 
 ### Inspect Retrieval Results
 
@@ -373,32 +403,29 @@ curl -X POST http://localhost:8000/v1/retrieval/debug \
 
 ## Configuration Reference
 
-| Variable | Purpose |
-| --- | --- |
-| `APP_PORT` | API port exposed by Docker Compose |
-| `DATABASE_URL` | SQLAlchemy PostgreSQL connection string |
-| `DEFAULT_TOP_K` | Number of chunks retrieved before context selection |
-| `DEFAULT_MAX_CONTEXT_CHUNKS` | Maximum retrieved chunks sent to the LLM |
-| `DEFAULT_CHUNK_SIZE` | Character length for fixed-size chunks |
-| `DEFAULT_CHUNK_OVERLAP` | Character overlap between adjacent chunks |
-| `EMBEDDING_PROVIDER` | `local` or `hosted` |
-| `EMBEDDING_MODEL` | SentenceTransformers model or hosted model ID |
-| `EMBEDDING_DIM` | Vector dimension stored in pgvector |
-| `EMBEDDING_API_KEY` | API key for hosted embeddings |
-| `EMBEDDING_API_URL` | Hosted embeddings endpoint |
-| `LLM_PROVIDER` | LLM provider type |
-| `LLM_MODEL` | Local model name sent to the chat endpoint |
-| `LLM_API_URL` | Ollama-compatible chat endpoint |
+| Variable                     | Purpose                                             |
+|------------------------------|-----------------------------------------------------|
+| `APP_PORT`                   | API port exposed by Docker Compose                  |
+| `DATABASE_URL`               | SQLAlchemy PostgreSQL connection string             |
+| `DEFAULT_TOP_K`              | Number of chunks retrieved before context selection |
+| `DEFAULT_MAX_CONTEXT_CHUNKS` | Maximum retrieved chunks sent to the LLM            |
+| `DEFAULT_CHUNK_SIZE`         | Character length for fixed-size chunks              |
+| `DEFAULT_CHUNK_OVERLAP`      | Character overlap between adjacent chunks           |
+| `EMBEDDING_PROVIDER`         | `local` or `hosted`                                 |
+| `EMBEDDING_MODEL`            | SentenceTransformers model or hosted model ID       |
+| `EMBEDDING_DIM`              | Vector dimension stored in pgvector                 |
+| `EMBEDDING_CACHE_DIR`        | SentenceTransformers cache directory                |
+| `EMBEDDING_API_KEY`          | API key for hosted embeddings                       |
+| `EMBEDDING_API_URL`          | Hosted embeddings endpoint                          |
+| `LLM_PROVIDER`               | LLM provider type                                   |
+| `LLM_MODEL`                  | Local model name sent to the chat endpoint          |
+| `LLM_API_URL`                | Ollama-compatible chat endpoint                     |
+| `ENABLE_CACHE`               | Enables in-memory query response caching            |
+| `CACHE_TTL_SECONDS`          | Query response cache TTL in seconds                 |
 
 ## Database and Migrations
 
 The database schema is managed with Alembic.
-
-Apply migrations:
-
-```bash
-docker exec -it rag_api alembic upgrade head
-```
 
 Create a migration after model changes:
 
@@ -406,7 +433,15 @@ Create a migration after model changes:
 docker exec -it rag_api alembic revision --autogenerate -m "describe change"
 ```
 
+Apply migrations:
+
+```bash
+docker exec -it rag_api alembic upgrade head
+```
+
 Changing vector dimensions on a populated table can fail because pgvector cannot automatically cast between dimensions. When switching embedding models, clear and re-ingest chunks or create a dedicated migration path.
+
+Query requests are logged in the `query_logs` table. Each row includes the request ID, query text, retrieval settings, retrieved document and chunk IDs, latency breakdown, cache-hit flag, fallback flag, and creation timestamp.
 
 ## Design Principles
 
@@ -414,6 +449,7 @@ Changing vector dimensions on a populated table can fail because pgvector cannot
 - Prefer clear service boundaries over tightly coupled orchestration.
 - Keep provider integrations replaceable.
 - Store citations and retrieval metadata alongside generated answers.
+- Capture query telemetry for debugging and evaluation.
 - Use database migrations for reproducible schema changes.
 - Make local development possible with Docker Compose and sample data.
 
@@ -422,8 +458,7 @@ Changing vector dimensions on a populated table can fail because pgvector cannot
 - Heading-aware or semantic chunking.
 - Reranking support for retrieved chunks.
 - Query rewriting and multi-query retrieval.
-- Response caching.
 - Automated retrieval and generation evaluation.
 - Document update and re-indexing workflows.
 - Authentication and workspace-level isolation.
-- Tracing, metrics, and production observability.
+- Tracing and production observability.

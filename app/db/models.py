@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func, JSON, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -60,3 +60,25 @@ class Chunk(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     document: Mapped["Document"] = relationship("Document", back_populates="chunks")
+
+class QueryLog(Base):
+    __tablename__ = "query_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    query_text: Mapped[str] = mapped_column(Text, nullable=False)
+    top_k: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_context_chunks: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    retrieved_doc_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    retrieved_chunk_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+
+    retrieval_latency_ms: Mapped[float] = mapped_column(nullable=False)
+    generation_latency_ms: Mapped[float] = mapped_column(nullable=False)
+    total_latency_ms: Mapped[float] = mapped_column(nullable=False)
+
+    cache_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    fallback_triggered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

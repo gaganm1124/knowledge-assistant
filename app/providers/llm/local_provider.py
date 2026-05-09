@@ -68,7 +68,7 @@ class LocalLLMProvider(LLMProvider):
             self.api_url,
             headers=headers,
             json=payload,
-            timeout=60,
+            timeout=120,
         )
         response.raise_for_status()
 
