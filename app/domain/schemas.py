@@ -26,7 +26,7 @@ class QueryRequest(BaseModel):
     top_k: int = 5
     max_context_chunks: int = 4
     min_score_threshold: float | None = None
-    use_reranker: bool = False # Not implemented yet
+    use_reranker: bool = False
     include_debug: bool = False
     use_cache: bool = True
 

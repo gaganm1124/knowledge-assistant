@@ -13,6 +13,7 @@ Knowledge Assistant is designed for teams that want a transparent, self-hostable
 - chunking with overlap
 - local or hosted embeddings
 - pgvector-based retrieval
+- optional heuristic reranking
 - grounded answer generation
 - source citations
 - latency and debug metadata
@@ -40,6 +41,7 @@ flowchart LR
         Chunk["Chunk"]:::stage
         Embed["Embed"]:::stage
         Retrieve["Retrieve"]:::stage
+        Rerank["Rerank"]:::stage
         Generate["Generate"]:::stage
         Cite["Cite"]:::stage
     end
@@ -57,7 +59,7 @@ flowchart LR
     Ask <--> Cache
     Embed --> Retrieve
     Retrieve <--> Store
-    Retrieve --> Generate --> LLM
+    Retrieve --> Rerank --> Generate --> LLM
     LLM --> Generate --> Cite --> Answer
     Ask --> Metrics
     Inspect --> Retrieve
@@ -96,8 +98,9 @@ sequenceDiagram
         User->>API: ask question
         API->>Cache: check cached response
         API->>Vectors: embed query
-        Vectors->>Search: find nearest chunks
+        Vectors->>Search: find nearest candidate chunks
         Search-->>API: ranked context
+        API->>API: optionally rerank candidates
         API->>LLM: answer from context
         LLM-->>API: grounded answer
         API->>Cache: cache response
@@ -123,6 +126,7 @@ flowchart TB
         ChunkSvc["Chunk"]:::service
         IngestSvc["Ingest"]:::service
         RetrievalSvc["Retrieve"]:::service
+        RerankingSvc["Rerank"]:::service
         GenerationSvc["Generate"]:::service
         CitationSvc["Cite"]:::service
         CacheSvc["Cache"]:::service
@@ -133,6 +137,7 @@ flowchart TB
         direction LR
         LocalEmbeddings["Local<br/>Embeddings"]:::provider
         HostedEmbeddings["Hosted<br/>Embeddings"]:::provider
+        HeuristicReranker["Heuristic<br/>Reranker"]:::provider
         LocalLLM["Local<br/>LLM"]:::provider
     end
 
@@ -147,6 +152,7 @@ flowchart TB
     Routes --> Services
     Services --> Providers
     Services --> Storage
+    RerankingSvc --> HeuristicReranker
     Postgres --- Pgvector
     MetricsSvc --> QueryLogs
     Alembic --> Postgres
@@ -166,6 +172,7 @@ flowchart TB
 - Optionally, use a hosted OpenAI-compatible embedding endpoint.
 - Store document metadata, chunk metadata, and vectors in PostgreSQL.
 - Retrieve relevant chunks using pgvector cosine distance.
+- Optionally rerank retrieved candidates with a lightweight heuristic reranker.
 - Generate grounded answers using only retrieved context.
 - Return citations for the chunks used as evidence.
 - Include request IDs, fallback flags, latency breakdowns, and optional debug payloads.
@@ -199,7 +206,8 @@ app/
   providers/
     embeddings/            local and hosted embedding providers
     llm/                   local LLM provider
-  services/                ingestion, retrieval, generation, citations, caching, metrics
+    reranker/              reranker provider interfaces and implementations
+  services/                ingestion, retrieval, reranking, generation, citations, caching, metrics
   utils/                   file helpers
 data/raw/                  sample documents
 migrations/                Alembic migrations
@@ -352,6 +360,7 @@ curl -X POST http://localhost:8000/v1/query \
     "top_k": 5,
     "max_context_chunks": 4,
     "min_score_threshold": null,
+    "use_reranker": true,
     "use_cache": true,
     "include_debug": true
   }'
@@ -380,13 +389,18 @@ Response shape:
     "cache_hit": false,
     "cache_key": "...",
     "normalized_query": "how do we roll back a failed deployment?",
+    "reranker_applied": true,
     "retrieved_chunks": [],
+    "filtered_chunks": [],
+    "reranked_chunks": [],
     "context_chunk_count": 4
   }
 }
 ```
 
 When `use_cache` is true and `ENABLE_CACHE` is enabled, repeated requests with the same normalized query and retrieval settings can be served from the in-memory cache. Each cached response receives a fresh `request_id`. Running document ingestion clears the query cache so new or changed content can be retrieved.
+
+When `use_reranker` is true and `ENABLE_RERANKER` is enabled, retrieval first expands to `RERANKER_CANDIDATE_POOL` candidates when needed, then reorders candidates before selecting `max_context_chunks` for generation. The built-in `heuristic` reranker combines the original vector score with lexical token overlap, title overlap, and a phrase-containment boost.
 
 ### Inspect Retrieval Results
 
@@ -422,6 +436,9 @@ curl -X POST http://localhost:8000/v1/retrieval/debug \
 | `LLM_API_URL`                | Ollama-compatible chat endpoint                     |
 | `ENABLE_CACHE`               | Enables in-memory query response caching            |
 | `CACHE_TTL_SECONDS`          | Query response cache TTL in seconds                 |
+| `ENABLE_RERANKER`            | Enables reranker service wiring                     |
+| `RERANKER_PROVIDER`          | Reranker provider ID, currently `heuristic`         |
+| `RERANKER_CANDIDATE_POOL`    | Candidate count retrieved before reranking          |
 
 ## Database and Migrations
 
@@ -456,9 +473,8 @@ Query requests are logged in the `query_logs` table. Each row includes the reque
 ## Roadmap
 
 - Heading-aware or semantic chunking.
-- Reranking support for retrieved chunks.
 - Query rewriting and multi-query retrieval.
-- Automated retrieval and generation evaluation.
+- Automated retrieval, reranking, and generation evaluation.
 - Document update and re-indexing workflows.
 - Authentication and workspace-level isolation.
 - Tracing and production observability.

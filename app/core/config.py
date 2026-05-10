@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     enable_cache: bool = True
     cache_ttl_seconds: int = 300
 
+    enable_reranker: bool = False
+    reranker_provider: str = "heuristic"
+    reranker_candidate_pool: int = 8
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=False,

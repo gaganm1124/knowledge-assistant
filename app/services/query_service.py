@@ -10,7 +10,8 @@ from app.services.cache_service import CacheService
 from app.services.citation_service import CitationService
 from app.services.generation_service import GenerationService
 from app.services.metrics_service import MetricsService
-from app.services.retrieval_service import RetrievalService
+from app.services.reranking_service import RerankingService
+from app.services.retrieval_service import RetrievalService, RetrievedChunk
 
 
 class QueryService:
@@ -30,12 +31,14 @@ class QueryService:
             citation_service: CitationService,
             metrics_service: MetricsService,
             cache_service: CacheService | None = None,
+            reranking_service: RerankingService | None = None,
     ):
         self.retrieval_service = retrieval_service
         self.generation_service = generation_service
         self.citation_service = citation_service
         self.metrics_service = metrics_service
         self.cache_service = cache_service
+        self.reranking_service = reranking_service
         self.logger = get_logger(__name__)
 
     def answer_query(
@@ -46,14 +49,21 @@ class QueryService:
             min_score_threshold: float | None = None,
             include_debug: bool = False,
             use_cache: bool = True,
+            use_reranker: bool = False,
+            reranker_candidate_pool: int = 8,
     ) -> QueryResponse:
         request_id = str(uuid.uuid4())
         normalized_query = self._normalize_query(query)
+
+        effective_top_k = max(top_k, reranker_candidate_pool if use_reranker else top_k)
+
         cache_key = self._build_cache_key(
             normalized_query=normalized_query,
-            top_k=top_k,
+            top_k=effective_top_k,
             max_context_chunks=max_context_chunks,
             min_score_threshold=min_score_threshold,
+            use_reranker=use_reranker,
+            reranker_candidate_pool=reranker_candidate_pool
         )
 
         total_start = time.perf_counter()
@@ -77,13 +87,15 @@ class QueryService:
                     query=normalized_query,
                     top_k=top_k,
                     max_context_chunks=max_context_chunks,
+                    use_reranker=use_reranker,
+                    reranker_candidate_pool=reranker_candidate_pool,
                 )
 
                 # Persist lightweight query log even for cache hit
                 self.metrics_service.persist_query_log(
                     request_id=request_id,
                     query_text=query,
-                    top_k=top_k,
+                    top_k=effective_top_k,
                     max_context_chunks=max_context_chunks,
                     retrieved_doc_ids=[],
                     retrieved_chunk_ids=[],
@@ -99,15 +111,26 @@ class QueryService:
         retrieval_start = time.perf_counter()
         retrieved = self.retrieval_service.retrieve(
             query=query,
-            top_k=top_k,
+            top_k=effective_top_k,
         )
         retrieval_latency_ms = (time.perf_counter() - retrieval_start) * 1000
 
+        filtered = retrieved
         # Apply optional score threshold
         if min_score_threshold is not None:
-            retrieved = [r for r in retrieved if r.score >= min_score_threshold]
+            filtered = [r for r in retrieved if r.score >= min_score_threshold]
 
-        context_chunks = retrieved[:max_context_chunks]
+        reranked = filtered
+        reranker_applied = False
+
+        if use_reranker and self.reranking_service is not None and filtered:
+            reranked = self.reranking_service.rerank(
+                query=query,
+                chunks=filtered,
+            )
+            reranker_applied = True
+
+        context_chunks = reranked[:max_context_chunks]
 
         generation_start = time.perf_counter()
 
@@ -132,16 +155,10 @@ class QueryService:
                 "cache_hit": False,
                 "cache_key": cache_key,
                 "normalized_query": normalized_query,
-                "retrieved_chunks": [
-                    {
-                        "document_title": chunk.document_title,
-                        "source_path": chunk.source_path,
-                        "chunk_index": chunk.chunk_index,
-                        "score": round(chunk.score, 4),
-                        "content_preview": chunk.content[:300],
-                    }
-                    for chunk in retrieved
-                ],
+                "reranker_applied": reranker_applied,
+                "retrieved_chunks": self.get_retrieved_chunks(retrieved),
+                "filtered_chunks": self.get_retrieved_chunks(filtered),
+                "reranked_chunks": self.get_retrieved_chunks(reranked),
                 "context_chunk_count": len(context_chunks),
             }
 
@@ -163,10 +180,13 @@ class QueryService:
             "query_completed",
             request_id=request_id,
             query=normalized_query,
-            top_k=top_k,
+            effective_top_k=effective_top_k,
             max_context_chunks=max_context_chunks,
             min_score_threshold=min_score_threshold,
+            use_reranker=use_reranker,
+            reranker_applied=reranker_applied,
             retrieved_count=len(retrieved),
+            filtered_count=len(filtered),
             context_count=len(context_chunks),
             cache_hit=False,
             fallback_triggered=fallback_triggered,
@@ -178,7 +198,7 @@ class QueryService:
         self.metrics_service.persist_query_log(
             request_id=request_id,
             query_text=query,
-            top_k=top_k,
+            top_k=effective_top_k,
             max_context_chunks=max_context_chunks,
             retrieved_doc_ids=list({r.document_id for r in retrieved}),
             retrieved_chunk_ids=[r.chunk_id for r in retrieved],
@@ -194,6 +214,19 @@ class QueryService:
 
         return response
 
+    @staticmethod
+    def get_retrieved_chunks(retrieved: list[RetrievedChunk]) -> list[dict]:
+        return [
+            {
+                "document_title": chunk.document_title,
+                "source_path": chunk.source_path,
+                "chunk_index": chunk.chunk_index,
+                "score": round(chunk.score, 4),
+                "content_preview": chunk.content[:300],
+            }
+            for chunk in retrieved
+        ]
+
     def _normalize_query(self, query: str) -> str:
         return " ".join(query.strip().lower().split())
 
@@ -203,8 +236,10 @@ class QueryService:
             top_k: int,
             max_context_chunks: int,
             min_score_threshold: float | None,
+            use_reranker: bool,
+            reranker_candidate_pool: int
     ) -> str:
-        raw = f"{normalized_query}|{top_k}|{max_context_chunks}|{min_score_threshold}"
+        raw = f"{normalized_query}|{top_k}|{max_context_chunks}|{min_score_threshold}|{use_reranker}|{reranker_candidate_pool}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _merge_debug(self, existing: dict | None, extra: dict | None) -> dict | None:
